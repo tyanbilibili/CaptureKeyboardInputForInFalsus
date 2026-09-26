@@ -23,6 +23,8 @@ from key_logic import (KeyLogic, ACTION_PLAY, ACTION_TOGGLE,           # noqa: E
                        VK_G, VK_CAPITAL, VK_CONTROL, VK_MENU, VK_LSHIFT)
 from keyhook import KeyboardHook                                       # noqa: E402
 
+VK_F = 0x46
+
 SOUNDS = {name: os.path.join(HERE, fn) for name, fn in
           (("g", "g.mp3"), ("capslock", "capslock.mp3"))}
 
@@ -139,6 +141,38 @@ class TestKeyboardHook(unittest.TestCase):
         self.assertTrue(vks & {0x10, 0xA0}, "钩子没有收到合成的 Shift 按下事件：%r" % (vks,))
 
 
+class TestRemap(unittest.TestCase):
+    """重映射：按下 G 时系统应该收到 F，松开 G 时 F 也要跟着抬起。"""
+
+    def test_g_is_injected_as_f(self):
+        hook = KeyboardHook(lambda vk, is_down: None)
+        self.assertTrue(hook.start_and_wait(), hook.error)
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE,
+                                       wintypes.DWORD, ctypes.c_void_p]
+        user32.keybd_event.restype = None
+        user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        user32.GetAsyncKeyState.restype = ctypes.c_short
+
+        pressed = released = None
+        try:
+            hook.update_remap({VK_G: VK_F})
+            time.sleep(0.05)
+            user32.keybd_event(VK_G, 0, 0, None)              # 按 G -> 应变成 F
+            time.sleep(0.2)
+            pressed = int(user32.GetAsyncKeyState(VK_F))
+            user32.keybd_event(VK_G, 0, 0x0002, None)         # 松开 G -> F 跟着抬起
+            time.sleep(0.2)
+            released = int(user32.GetAsyncKeyState(VK_F))
+        finally:
+            hook.update_remap({})
+            hook.stop()
+
+        self.assertTrue(pressed & 0x8000, "按下 G 之后没有注入 F")
+        self.assertFalse(released & 0x8000, "松开 G 之后 F 没有跟着抬起")
+
+
 class TestEndToEnd(unittest.TestCase):
     """真正跑起 GUI：安装钩子 -> 合成一次 G -> 检查音效被触发。"""
 
@@ -169,6 +203,15 @@ class TestEndToEnd(unittest.TestCase):
 
             self.assertNotEqual(app.last_label.cget("text"), "—")
             self.assertIn("G", app.last_label.cget("text"))
+
+            # 勾选「按键改写」后，钩子应该拿到映射表
+            app.remap_var.set(True)
+            deadline = time.time() + 1.0
+            while time.time() < deadline and not app.hook.remap:
+                root.update()
+                time.sleep(0.01)
+            self.assertEqual(app.hook.remap, kl.REMAP_PAIRS)
+            app.remap_var.set(False)
         finally:
             app.on_close()
 

@@ -23,7 +23,8 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from audio_player import AudioPlayer                                  # noqa: E402
-from key_logic import KeyLogic, ACTION_TOGGLE, ACTION_PLAY            # noqa: E402
+from key_logic import (KeyLogic, ACTION_TOGGLE, ACTION_PLAY,          # noqa: E402
+                       VK_CAPITAL, VK_G, VK_LSHIFT)
 from keyhook import KeyboardHook                                      # noqa: E402
 
 # 音效名 -> 文件名
@@ -34,6 +35,14 @@ SOUNDS = {
 SOUND_LABEL = {
     "g": "G",
     "capslock": "CapsLock",
+}
+
+VK_F = 0x46
+
+# 勾选「按键改写」后的映射：CapsLock -> LShift，G -> F
+REMAP_PAIRS = {
+    VK_CAPITAL: VK_LSHIFT,
+    VK_G: VK_F,
 }
 
 COMBO_TEXT = "Ctrl + Alt + G"
@@ -136,11 +145,24 @@ class App(object):
 
         # 选项
         self.swallow_var = tk.BooleanVar(value=False)
-        chk = tk.Checkbutton(card, text="屏蔽 CapsLock 本身的大小写切换",
-                             variable=self.swallow_var, bg=CARD, fg=TEXT,
-                             activebackground=CARD, font=(FONT, 9),
-                             selectcolor=CARD, anchor="w", cursor="hand2")
-        chk.pack(fill="x", padx=14, pady=(0, 16))
+        self.swallow_chk = tk.Checkbutton(card, text="屏蔽 CapsLock 本身的大小写切换",
+                                          variable=self.swallow_var, bg=CARD, fg=TEXT,
+                                          activebackground=CARD, font=(FONT, 9),
+                                          selectcolor=CARD, anchor="w", cursor="hand2")
+        self.swallow_chk.pack(fill="x", padx=14, pady=(0, 2))
+
+        self.remap_var = tk.BooleanVar(value=False)
+        self.remap_chk = tk.Checkbutton(card, text="按键改写：CapsLock→LShift、G→F",
+                                        variable=self.remap_var, bg=CARD, fg=TEXT,
+                                        activebackground=CARD, font=(FONT, 9),
+                                        selectcolor=CARD, anchor="w", cursor="hand2",
+                                        command=self._sync_option_states)
+        self.remap_chk.pack(fill="x", padx=14, pady=(0, 2))
+
+        tk.Label(card, text="勾选后按下这两个键，会先把按键改写成目标键再送给系统"
+                            "（仅在「监听中」生效）。",
+                 bg=CARD, fg=MUTED, font=(FONT, 8), anchor="w", justify="left",
+                 wraplength=290).pack(fill="x", padx=19, pady=(0, 14))
 
     def _separator(self, parent):
         tk.Frame(parent, bg="#e3e6ec", height=1).pack(fill="x", padx=18)
@@ -170,6 +192,10 @@ class App(object):
             text += "  (播放失败)"
         self.last_label.configure(text=text)
 
+    def _sync_option_states(self):
+        """按键改写开启时 CapsLock 已被改写，屏蔽大小写切换就没意义了。"""
+        self.swallow_chk.configure(state="disabled" if self.remap_var.get() else "normal")
+
     # -- 动作 ---------------------------------------------------------------
     def toggle_manual(self):
         self.logic.enabled = not self.logic.enabled
@@ -192,8 +218,11 @@ class App(object):
             for action, payload in self.logic.handle(vk, is_down):
                 self._apply(action, payload)
 
-        # 让钩子知道现在要不要吞掉 CapsLock
+        # 让钩子知道现在要不要吞掉 CapsLock、要不要改写按键
         self.hook.swallow_capslock = bool(self.logic.enabled and self.swallow_var.get())
+        remap = REMAP_PAIRS if (self.logic.enabled and self.remap_var.get()) else {}
+        if remap != self.hook.remap:
+            self.hook.update_remap(remap)
         self.audio.cleanup()
         if handled:
             self._refresh_status()
