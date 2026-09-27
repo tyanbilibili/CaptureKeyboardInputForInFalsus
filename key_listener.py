@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """监听按键
 
-组合键 Ctrl + Alt + G 开启 / 关闭监听。
+组合键 Alt + Z 开启 / 关闭监听。
 监听开启时：
     G         -> 播放 g.mp3
     CapsLock  -> 播放 capslock.mp3
 短时间连续按下时，后按下的音效会打断并覆盖前一个。
+
+窗口里还有两组可选的重映射开关（默认关闭，只在「监听中」生效）：
+    按键改写：CapsLock -> LShift、G -> F
+    鼠标改写：鼠标左键 -> LShift、鼠标右键 -> Space、鼠标中键 -> 鼠标左键
 
 运行：双击 启动.bat，或在本目录执行  python key_listener.py
 """
@@ -24,8 +28,10 @@ if HERE not in sys.path:
 
 from audio_player import AudioPlayer                                  # noqa: E402
 from key_logic import (KeyLogic, ACTION_TOGGLE, ACTION_PLAY,          # noqa: E402
-                       VK_CAPITAL, VK_G, VK_LSHIFT)
-from keyhook import KeyboardHook                                      # noqa: E402
+                       VK_CAPITAL, VK_SPACE, VK_G, VK_LSHIFT, VK_Z)
+from keyhook import (InputHook, WM_LBUTTONDOWN, WM_LBUTTONUP,         # noqa: E402
+                     WM_MBUTTONDOWN, WM_MBUTTONUP,
+                     WM_RBUTTONDOWN, WM_RBUTTONUP)
 
 # 音效名 -> 文件名
 SOUNDS = {
@@ -45,7 +51,23 @@ REMAP_PAIRS = {
     VK_G: VK_F,
 }
 
-COMBO_TEXT = "Ctrl + Alt + G"
+# 勾选「鼠标改写」后的映射：
+#   左键 -> LShift、右键 -> Space、中键 -> 鼠标左键
+#   中键那条很关键：它是改写生效后唯一还能"点击"的通道
+MOUSE_REMAP = {
+    WM_LBUTTONDOWN: ("key", VK_LSHIFT),
+    WM_LBUTTONUP: ("key", VK_LSHIFT),
+    WM_RBUTTONDOWN: ("key", VK_SPACE),
+    WM_RBUTTONUP: ("key", VK_SPACE),
+    WM_MBUTTONDOWN: ("mouse", "left"),
+    WM_MBUTTONUP: ("mouse", "left"),
+}
+
+# 开关组合键：Alt + Z（改这两行就能换组合键）
+COMBO_MODIFIERS = ("alt",)
+COMBO_KEYS = frozenset((VK_Z,))
+
+COMBO_TEXT = "Alt + Z"
 FONT = "Microsoft YaHei UI"
 
 BG = "#eef0f4"
@@ -81,13 +103,17 @@ def acquire_single_instance():
 
 
 class App(object):
-    def __init__(self, root):
+    def __init__(self, root, quiet=False):
         self.root = root
+        self.quiet = quiet     # 自检 / 无人值守时不弹对话框，免得卡住
         self.audio = AudioPlayer({name: os.path.join(HERE, fn) for name, fn in SOUNDS.items()})
-        self.logic = KeyLogic(enabled=True)     # 打开程序即开始监听
+        # 打开程序即开始监听
+        self.logic = KeyLogic(enabled=True,
+                              combo_modifiers=COMBO_MODIFIERS,
+                              combo_keys=COMBO_KEYS)
         self.events = queue.Queue()
         # 钩子线程只往队列里丢 (vk, is_down)，由主线程统一处理
-        self.hook = KeyboardHook(lambda vk, is_down: self.events.put((vk, is_down)))
+        self.hook = InputHook(lambda vk, is_down: self.events.put((vk, is_down)))
         self._after_id = None
         self._build_ui()
         self._refresh_status()
@@ -159,9 +185,18 @@ class App(object):
                                         command=self._sync_option_states)
         self.remap_chk.pack(fill="x", padx=14, pady=(0, 2))
 
-        tk.Label(card, text="勾选后按下这两个键，会先把按键改写成目标键再送给系统"
-                            "（仅在「监听中」生效）。",
-                 bg=CARD, fg=MUTED, font=(FONT, 8), anchor="w", justify="left",
+        self.mouse_var = tk.BooleanVar(value=False)
+        self.mouse_chk = tk.Checkbutton(card, text="鼠标改写：左键→LShift、右键→Space、中键→左键",
+                                        variable=self.mouse_var, bg=CARD, fg=TEXT,
+                                        activebackground=CARD, font=(FONT, 9),
+                                        selectcolor=CARD, anchor="w", cursor="hand2",
+                                        command=self._sync_option_states)
+        self.mouse_chk.pack(fill="x", padx=14, pady=(0, 2))
+
+        tk.Label(card, text="两组「改写」都只在「监听中」生效：按下源按键会改写成目标键。\n"
+                            "鼠标改写会吞掉左/右/中键，但中键已变成左键——需要点击时请按中键。\n"
+                            "脱身办法：按 Alt+Z 暂停监听，或用 Tab + 空格取消勾选。",
+                 bg=CARD, fg="#c2410c", font=(FONT, 8), anchor="w", justify="left",
                  wraplength=290).pack(fill="x", padx=19, pady=(0, 14))
 
     def _separator(self, parent):
@@ -221,8 +256,9 @@ class App(object):
         # 让钩子知道现在要不要吞掉 CapsLock、要不要改写按键
         self.hook.swallow_capslock = bool(self.logic.enabled and self.swallow_var.get())
         remap = REMAP_PAIRS if (self.logic.enabled and self.remap_var.get()) else {}
-        if remap != self.hook.remap:
-            self.hook.update_remap(remap)
+        mouse_remap = MOUSE_REMAP if (self.logic.enabled and self.mouse_var.get()) else {}
+        if remap != self.hook.remap or mouse_remap != self.hook.mouse_remap:
+            self.hook.update_remap(remap, mouse_remap)
         self.audio.cleanup()
         if handled:
             self._refresh_status()
@@ -232,8 +268,18 @@ class App(object):
     def start(self):
         if not self.hook.start_and_wait():
             self.status_label.configure(text="钩子安装失败")
-            messagebox.showerror("监听按键", "无法安装键盘钩子：\n%s" % self.hook.error)
+            if self.quiet:
+                print("HOOK FAILED:", self.hook.error)
+            else:
+                messagebox.showerror("监听按键", "无法安装键盘钩子：\n%s" % self.hook.error)
             return
+        if not self.hook.mouse_installed:
+            if self.quiet:
+                print("MOUSE HOOK FAILED:", self.hook.error)
+            else:
+                messagebox.showwarning("监听按键",
+                                       "鼠标钩子安装失败，「鼠标改写」将不可用：\n%s"
+                                       % self.hook.error)
         self._poll()
 
     def on_close(self):
@@ -256,19 +302,24 @@ def main():
     root.withdraw()
 
     if not acquire_single_instance():
-        messagebox.showinfo("监听按键", "程序已经在运行了。\n请看任务栏里的窗口。")
+        if smoke:
+            print("ALREADY RUNNING")
+        else:
+            messagebox.showinfo("监听按键", "程序已经在运行了。\n请看任务栏里的窗口。")
         root.destroy()
         return
 
     root.deiconify()
-    app = App(root)
+    app = App(root, quiet=smoke)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     _center(root)
     root.after(60, app.start)
 
     if smoke:
         def report():
-            print("hook installed:", app.hook.installed, "| error:", app.hook.error)
+            print("hook installed:", app.hook.installed,
+                  "| mouse:", app.hook.mouse_installed,
+                  "| error:", app.hook.error)
             print("status/button  :", app.status_label.cget("text"), "/",
                   app.toggle_btn.cget("text"))
             app.toggle_manual()
